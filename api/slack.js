@@ -16,9 +16,9 @@ Your behavior:
 4. Keep answers concise, warm, and in plain language.
 5. If the question is clearly not HR-related, politely say so.`;
 
-function verifySlackSignature(req, rawBody) {
-  const timestamp = req.headers["x-slack-request-timestamp"];
-  const slackSig = req.headers["x-slack-signature"];
+function verifySlackSignature(headers, rawBody) {
+  const timestamp = headers["x-slack-request-timestamp"];
+  const slackSig = headers["x-slack-signature"];
   if (!timestamp || !slackSig) return false;
   if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) return false;
   const sigBase = `v0:${timestamp}:${rawBody}`;
@@ -61,11 +61,7 @@ async function askClaude(question) {
   return data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
 }
 
-async function createJiraTicket(summary, description, employeeName) {
-  const fullDesc = employeeName
-    ? `Submitted via AskPeople Slack bot by: ${employeeName}\n\n${description}`
-    : `Submitted via AskPeople Slack bot\n\n${description}`;
-
+async function createJiraTicket(summary, description) {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -78,7 +74,7 @@ async function createJiraTicket(summary, description, employeeName) {
       model: "claude-sonnet-4-20250514",
       max_tokens: 500,
       system: `You are a Jira ticket creator. Use the createJiraIssue tool with cloudId: "meshconnectapi.atlassian.net", projectKey: "HR", issueTypeName: "HR inquiry". After creating, return only this JSON: {"ticketKey":"<key>","ticketUrl":"<url>"}`,
-      messages: [{ role: "user", content: `Create an HR inquiry ticket. Summary: "${summary}". Description: "${fullDesc}"` }],
+      messages: [{ role: "user", content: `Create an HR inquiry ticket. Summary: "${summary}". Description: "${description}"` }],
       mcp_servers: [
         { type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian" },
       ],
@@ -96,18 +92,28 @@ async function createJiraTicket(summary, description, employeeName) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const rawBody = JSON.stringify(req.body);
+  // Read raw body for signature verification
+  const rawBody = await new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => resolve(data));
+  });
 
-  // Verify the request is genuinely from Slack
-  if (!verifySlackSignature(req, rawBody)) {
-    return res.status(401).json({ error: "Invalid signature" });
+  let body;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return res.status(400).json({ error: "Invalid JSON" });
   }
-
-  const body = req.body;
 
   // Slack URL verification handshake (one-time setup)
   if (body.type === "url_verification") {
     return res.status(200).json({ challenge: body.challenge });
+  }
+
+  // Verify the request is genuinely from Slack
+  if (!verifySlackSignature(req.headers, rawBody)) {
+    return res.status(401).json({ error: "Invalid signature" });
   }
 
   // Only handle direct messages to the bot
@@ -124,13 +130,10 @@ export default async function handler(req, res) {
   if (!question) return;
 
   try {
-    // Send a thinking message so the employee knows it's working
     await postToSlack(channel, "Looking that up for you... 🔍");
 
-    // Ask Claude (searches Notion, answers or returns escalate JSON)
     const answer = await askClaude(question);
 
-    // Check if Claude wants to escalate to Jira
     const jsonMatch = answer.match(/\{"action"\s*:\s*"create_ticket"[\s\S]*?\}/);
     if (jsonMatch) {
       let parsed;
@@ -152,7 +155,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Post Claude's answer back to the employee
     await postToSlack(channel, answer);
 
   } catch (err) {
