@@ -188,7 +188,7 @@ export default async function handler(req) {
     const pages = await searchNotion(question);
     let notionContext = "";
 
-    for (const page of pages.slice(0, 3)) {
+    for (const page of pages.slice(0, 10)) {
       const title =
         page.properties?.title?.title?.[0]?.plain_text ||
         page.properties?.Name?.title?.[0]?.plain_text ||
