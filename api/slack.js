@@ -1,7 +1,4 @@
-import crypto from "crypto";
-
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 const NOTION_INTRANET_URL = "https://www.notion.so/29bf862e950a80619162c55ed4096b87";
@@ -15,16 +12,6 @@ Your behavior:
 {"action":"create_ticket","summary":"<one sentence describing the question>","description":"<the employee's full question>"}
 4. Keep answers concise, warm, and in plain language.
 5. If the question is clearly not HR-related, politely say so.`;
-
-function verifySlackSignature(headers, rawBody) {
-  const timestamp = headers["x-slack-request-timestamp"];
-  const slackSig = headers["x-slack-signature"];
-  if (!timestamp || !slackSig) return false;
-  if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) return false;
-  const sigBase = `v0:${timestamp}:${rawBody}`;
-  const myHash = "v0=" + crypto.createHmac("sha256", SLACK_SIGNING_SECRET).update(sigBase).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(myHash), Buffer.from(slackSig));
-}
 
 async function postToSlack(channel, text) {
   await fetch("https://slack.com/api/chat.postMessage", {
@@ -89,46 +76,7 @@ async function createJiraTicket(summary, description) {
   return null;
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).end();
-
-  // Read raw body for signature verification
-  const rawBody = await new Promise((resolve) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => resolve(data));
-  });
-
-  let body;
-  try {
-    body = JSON.parse(rawBody);
-  } catch {
-    return res.status(400).json({ error: "Invalid JSON" });
-  }
-
-  // Slack URL verification handshake (one-time setup)
-  if (body.type === "url_verification") {
-    return res.status(200).json({ challenge: body.challenge });
-  }
-
-// Verify the request is genuinely from Slack
-// if (!verifySlackSignature(req.headers, rawBody)) {
-//   return res.status(401).json({ error: "Invalid signature" });
-// }
-
-  // Only handle direct messages to the bot
-  const event = body.event;
-  if (!event || event.type !== "message" || event.subtype || event.bot_id) {
-    return res.status(200).end();
-  }
-
-  // Acknowledge Slack immediately (Slack requires a response within 3 seconds)
-  res.status(200).end();
-
-  const channel = event.channel;
-  const question = event.text?.trim();
-  if (!question) return;
-
+async function processMessage(channel, question) {
   try {
     await postToSlack(channel, "Looking that up for you... 🔍");
 
@@ -161,4 +109,36 @@ export default async function handler(req, res) {
     console.error("AskPeople error:", err);
     await postToSlack(channel, "Something went wrong on my end. Please try again or reach out in *#ask-people*.");
   }
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).end();
+
+  let body;
+  try {
+    body = req.body;
+    if (typeof body === "string") body = JSON.parse(body);
+  } catch {
+    return res.status(400).json({ error: "Invalid JSON" });
+  }
+
+  // Slack URL verification handshake (one-time setup)
+  if (body.type === "url_verification") {
+    return res.status(200).json({ challenge: body.challenge });
+  }
+
+  const event = body.event;
+  if (!event || event.type !== "message" || event.subtype || event.bot_id) {
+    return res.status(200).end();
+  }
+
+  const channel = event.channel;
+  const question = event.text?.trim();
+  if (!question) return res.status(200).end();
+
+  // Acknowledge Slack immediately — must respond within 3 seconds
+  res.status(200).end();
+
+  // Process in background after responding to Slack
+  await processMessage(channel, question);
 }
