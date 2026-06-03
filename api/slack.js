@@ -187,7 +187,8 @@ export default async function handler(req) {
 
       if (!notionContext) {
         notionContext = "No relevant pages found in the Mesh Company Intranet.";
-      }
+        }
+console.log("Notion context preview:", notionContext.slice(0, 500));
 
       const answer = await askClaude(question, notionContext);
 
