@@ -8,9 +8,11 @@ const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 
-const NOTION_DATABASE_ID = "29bf862e950a80619162c55ed4096b87";
 const JIRA_BASE_URL = "https://meshconnectapi.atlassian.net";
 const JIRA_PROJECT = "HR";
+
+// Deduplicate messages — Slack sometimes sends the same event twice
+const processed = new Set();
 
 async function postToSlack(channel, text) {
   const resp = await fetch("https://slack.com/api/chat.postMessage", {
@@ -22,7 +24,7 @@ async function postToSlack(channel, text) {
     body: JSON.stringify({ channel, text }),
   });
   const data = await resp.json();
-  console.log("Slack post result:", JSON.stringify(data).slice(0, 200));
+  console.log("Slack post:", data.ok, data.error || "");
   return data;
 }
 
@@ -42,50 +44,63 @@ async function searchNotion(query) {
     }),
   });
   const data = await resp.json();
-  console.log("Notion search results count:", data.results?.length);
+  console.log("Notion results:", data.results?.length, "error:", data.message || "none");
   return data.results || [];
 }
 
-async function getNotionPage(pageId) {
-  const resp = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+async function getNotionBlocks(pageId) {
+  const resp = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children?page_size=50`, {
     headers: {
       "Authorization": `Bearer ${NOTION_TOKEN}`,
       "Notion-Version": "2022-06-28",
     },
   });
   const data = await resp.json();
-  return data.results || [];
+  const blocks = data.results || [];
+  console.log("Blocks for page", pageId, "count:", blocks.length, "types:", blocks.slice(0,3).map(b => b.type).join(","));
+  return blocks;
 }
 
-function extractTextFromBlocks(blocks) {
-  return blocks
-    .map((block) => {
-      const type = block.type;
-      const content = block[type];
-      if (content?.rich_text) {
-        return content.rich_text.map((t) => t.plain_text).join("");
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n")
-    .slice(0, 3000);
+function extractText(blocks) {
+  const lines = [];
+  for (const block of blocks) {
+    const type = block.type;
+    const content = block[type];
+    
+    // Handle rich_text blocks (paragraph, heading, bulleted_list_item, etc.)
+    if (content?.rich_text?.length > 0) {
+      const text = content.rich_text.map(t => t.plain_text).join("");
+      if (text.trim()) lines.push(text);
+    }
+    
+    // Handle child_page blocks
+    if (type === "child_page") {
+      lines.push(`[Page: ${block.child_page?.title || ""}]`);
+    }
+    
+    // Handle child_database blocks
+    if (type === "child_database") {
+      lines.push(`[Database: ${block.child_database?.title || ""}]`);
+    }
+  }
+  return lines.join("\n").slice(0, 3000);
 }
 
 async function askClaude(question, notionContext) {
-  console.log("Calling Claude...");
+  console.log("Calling Claude, context length:", notionContext.length);
+  
   const systemPrompt = `You are AskPeople, a friendly HR assistant for Mesh. You help employees get quick answers to HR questions.
 
-Here is the relevant content from the Mesh Company Intranet:
+Here is content retrieved from the Mesh Company Intranet in Notion:
 
 ${notionContext}
 
-Your behavior:
-1. Answer the employee's question based ONLY on the content above.
+Instructions:
+1. Answer the employee's question based on the content above.
 2. Be concise, warm, and use plain language.
-3. If the content above does not contain enough information to answer confidently, respond with EXACTLY this JSON and nothing else:
+3. If the content does not contain enough information to answer confidently, respond with EXACTLY this JSON and nothing else:
 {"action":"create_ticket","summary":"<one sentence describing the question>","description":"<the employee's full question>"}
-4. If the question is clearly not HR-related, politely say so.`;
+4. If the question is not HR-related, politely say so.`;
 
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -102,8 +117,10 @@ Your behavior:
     }),
   });
   const data = await resp.json();
-  console.log("Claude response type:", data.type);
-  return data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
+  console.log("Claude type:", data.type, "stop_reason:", data.stop_reason);
+  const answer = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  console.log("Claude answer preview:", answer.slice(0, 200));
+  return answer;
 }
 
 async function createJiraTicket(summary, description) {
@@ -122,24 +139,16 @@ async function createJiraTicket(summary, description) {
         description: {
           type: "doc",
           version: 1,
-          content: [
-            {
-              type: "paragraph",
-              content: [{ type: "text", text: description }],
-            },
-          ],
+          content: [{ type: "paragraph", content: [{ type: "text", text: description }] }],
         },
         issuetype: { name: "HR inquiry" },
       },
     }),
   });
   const data = await resp.json();
-  console.log("Jira response:", JSON.stringify(data).slice(0, 200));
+  console.log("Jira result:", data.key || JSON.stringify(data).slice(0, 200));
   if (data.key) {
-    return {
-      ticketKey: data.key,
-      ticketUrl: `${JIRA_BASE_URL}/browse/${data.key}`,
-    };
+    return { ticketKey: data.key, ticketUrl: `${JIRA_BASE_URL}/browse/${data.key}` };
   }
   return null;
 }
@@ -163,32 +172,43 @@ export default async function handler(req) {
 
   const channel = event.channel;
   const question = event.text?.trim();
+  const eventId = event.client_msg_id || event.ts;
+
   if (!question) return new Response("OK", { status: 200 });
+
+  // Deduplicate — ignore if we already processed this message
+  if (processed.has(eventId)) {
+    console.log("Duplicate event, skipping:", eventId);
+    return new Response("OK", { status: 200 });
+  }
+  processed.add(eventId);
 
   const process = async () => {
     try {
       await postToSlack(channel, "Looking that up for you... 🔍");
 
-      // Search Notion for relevant pages
       const pages = await searchNotion(question);
       let notionContext = "";
 
-      if (pages.length > 0) {
-        for (const page of pages.slice(0, 3)) {
-          const title = page.properties?.title?.title?.[0]?.plain_text ||
-            page.properties?.Name?.title?.[0]?.plain_text || "Untitled";
-          const blocks = await getNotionPage(page.id);
-          const text = extractTextFromBlocks(blocks);
-          if (text) {
-            notionContext += `\n\n--- ${title} ---\n${text}`;
-          }
+      for (const page of pages.slice(0, 3)) {
+        const title =
+          page.properties?.title?.title?.[0]?.plain_text ||
+          page.properties?.Name?.title?.[0]?.plain_text ||
+          page.properties?.["Page"]?.title?.[0]?.plain_text ||
+          "Untitled";
+        const blocks = await getNotionBlocks(page.id);
+        const text = extractText(blocks);
+        console.log(`Page "${title}" extracted text length:`, text.length);
+        if (text.trim()) {
+          notionContext += `\n\n--- ${title} ---\n${text}`;
         }
       }
 
-      if (!notionContext) {
-        notionContext = "No relevant pages found in the Mesh Company Intranet.";
-        }
-console.log("Notion context preview:", notionContext.slice(0, 500));
+      if (!notionContext.trim()) {
+        notionContext = "No relevant content found in the Mesh Company Intranet.";
+      }
+
+      console.log("Total context length:", notionContext.length);
 
       const answer = await askClaude(question, notionContext);
 
@@ -203,10 +223,7 @@ console.log("Notion context preview:", notionContext.slice(0, 500));
             `Submitted via AskPeople Slack bot\n\n${parsed.description || question}`
           );
           if (ticket?.ticketKey) {
-            await postToSlack(
-              channel,
-              `✅ Ticket raised: *${ticket.ticketKey}* — ${parsed.summary || question}\nThe HR team will follow up with you shortly. <${ticket.ticketUrl}|View ticket>`
-            );
+            await postToSlack(channel, `✅ Ticket raised: *${ticket.ticketKey}* — ${parsed.summary || question}\nThe HR team will follow up with you shortly. <${ticket.ticketUrl}|View ticket>`);
           } else {
             await postToSlack(channel, "I tried to raise a ticket but hit an issue. Please reach out directly in *#ask-people*.");
           }
@@ -217,7 +234,7 @@ console.log("Notion context preview:", notionContext.slice(0, 500));
       await postToSlack(channel, answer);
 
     } catch (err) {
-      console.error("AskPeople error:", err);
+      console.error("AskPeople error:", err.message);
       await postToSlack(channel, "Something went wrong on my end. Please try again or reach out in *#ask-people*.");
     }
   };
