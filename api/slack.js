@@ -239,7 +239,14 @@ export default async function handler(req) {
     }
   };
 
-  await process();
+  // Respond to Slack immediately to prevent retries
+const response = new Response("OK", { status: 200 });
 
-  return new Response("OK", { status: 200 });
+// Process in background using waitUntil
+if (typeof EdgeRuntime !== "undefined") {
+  EdgeRuntime.waitUntil(process());
+} else {
+  process(); // fire and forget
 }
+
+return response;
