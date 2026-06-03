@@ -13,8 +13,12 @@ export default async function handler(req, res) {
     return res.status(200).json({ challenge: body.challenge });
   }
 
+  // Log everything so we can see what Slack is sending
+  console.log("Full event body:", JSON.stringify(body));
+
   const event = body.event;
   if (!event || event.type !== "message" || event.subtype || event.bot_id) {
+    console.log("Event filtered out:", JSON.stringify(event));
     return res.status(200).end();
   }
 
