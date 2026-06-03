@@ -41,16 +41,20 @@ async function askClaude(question) {
       "anthropic-version": "2023-06-01",
 "anthropic-beta": "mcp-client-2025-11-20",
     },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: question }],
-      mcp_servers: [
-        { type: "url", url: "https://mcp.notion.com/mcp", name: "notion" },
-        { type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian" },
-      ],
-    }),
+body: JSON.stringify({
+  model: "claude-sonnet-4-20250514",
+  max_tokens: 1000,
+  system: SYSTEM_PROMPT,
+  messages: [{ role: "user", content: question }],
+  mcp_servers: [
+    { type: "url", url: "https://mcp.notion.com/mcp", name: "notion" },
+    { type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian" },
+  ],
+  tools: [
+    { type: "mcp_toolset", mcp_server_name: "notion" },
+    { type: "mcp_toolset", mcp_server_name: "atlassian" },
+  ],
+}),
   });
   const data = await resp.json();
 console.log("Claude full response:", JSON.stringify(data));
@@ -67,15 +71,14 @@ async function createJiraTicket(summary, description) {
 "anthropic-beta": "mcp-client-2025-11-20",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 500,
-      system: `You are a Jira ticket creator. Use the createJiraIssue tool with cloudId: "meshconnectapi.atlassian.net", projectKey: "HR", issueTypeName: "HR inquiry". After creating, return only this JSON: {"ticketKey":"<key>","ticketUrl":"<url>"}`,
-      messages: [{ role: "user", content: `Create an HR inquiry ticket. Summary: "${summary}". Description: "${description}"` }],
-      mcp_servers: [
-        { type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian" },
-      ],
-    }),
-  });
+  model: "claude-sonnet-4-20250514",
+  max_tokens: 500,
+  system: `You are a Jira ticket creator. Use the createJiraIssue tool with cloudId: "meshconnectapi.atlassian.net", projectKey: "HR", issueTypeName: "HR inquiry". After creating, return only this JSON: {"ticketKey":"<key>","ticketUrl":"<url>"}`,
+  messages: [{ role: "user", content: `Create an HR inquiry ticket. Summary: "${summary}". Description: "${description}"` }],
+  mcp_servers: [
+    { type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian" },
+  ],
+  tool
   const data = await resp.json();
   const text = data.content?.map((b) => b.text || "").join("") || "";
   try {
