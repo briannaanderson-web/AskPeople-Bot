@@ -11,9 +11,6 @@ const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_BASE_URL = "https://meshconnectapi.atlassian.net";
 const JIRA_PROJECT = "HR";
 
-// Deduplicate messages — Slack sometimes sends the same event twice
-const processed = new Set();
-
 async function postToSlack(channel, text) {
   const resp = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
@@ -40,11 +37,17 @@ async function searchNotion(query) {
     body: JSON.stringify({
       query,
       filter: { value: "page", property: "object" },
-      page_size: 5,
+      page_size: 10,
+      sort: { direction: "descending", timestamp: "last_edited_time" },
     }),
   });
   const data = await resp.json();
   console.log("Notion results:", data.results?.length, "error:", data.message || "none");
+  console.log("Page titles found:", data.results?.map(p =>
+    p.properties?.title?.title?.[0]?.plain_text ||
+    p.properties?.Name?.title?.[0]?.plain_text ||
+    "Untitled"
+  ).join(", "));
   return data.results || [];
 }
 
@@ -57,7 +60,7 @@ async function getNotionBlocks(pageId) {
   });
   const data = await resp.json();
   const blocks = data.results || [];
-  console.log("Blocks for page", pageId, "count:", blocks.length, "types:", blocks.slice(0,3).map(b => b.type).join(","));
+  console.log("Blocks for page", pageId, "count:", blocks.length, "types:", blocks.slice(0, 3).map(b => b.type).join(","));
   return blocks;
 }
 
@@ -66,19 +69,16 @@ function extractText(blocks) {
   for (const block of blocks) {
     const type = block.type;
     const content = block[type];
-    
-    // Handle rich_text blocks (paragraph, heading, bulleted_list_item, etc.)
+
     if (content?.rich_text?.length > 0) {
       const text = content.rich_text.map(t => t.plain_text).join("");
       if (text.trim()) lines.push(text);
     }
-    
-    // Handle child_page blocks
+
     if (type === "child_page") {
       lines.push(`[Page: ${block.child_page?.title || ""}]`);
     }
-    
-    // Handle child_database blocks
+
     if (type === "child_database") {
       lines.push(`[Database: ${block.child_database?.title || ""}]`);
     }
@@ -88,7 +88,7 @@ function extractText(blocks) {
 
 async function askClaude(question, notionContext) {
   console.log("Calling Claude, context length:", notionContext.length);
-  
+
   const systemPrompt = `You are AskPeople, a friendly HR assistant for Mesh. You help employees get quick answers to HR questions.
 
 Here is content retrieved from the Mesh Company Intranet in Notion:
@@ -172,16 +172,15 @@ export default async function handler(req) {
 
   const channel = event.channel;
   const question = event.text?.trim();
-  const eventId = event.client_msg_id || event.ts;
 
   if (!question) return new Response("OK", { status: 200 });
 
-  // Deduplicate — ignore if we already processed this message
-  if (processed.has(eventId)) {
-    console.log("Duplicate event, skipping:", eventId);
+  // Ignore Slack retries — these cause duplicate messages
+  const retryNum = req.headers.get("x-slack-retry-num");
+  if (retryNum) {
+    console.log("Slack retry, skipping:", retryNum);
     return new Response("OK", { status: 200 });
   }
-  processed.add(eventId);
 
   const process = async () => {
     try {
@@ -240,13 +239,13 @@ export default async function handler(req) {
   };
 
   // Respond to Slack immediately to prevent retries
-const response = new Response("OK", { status: 200 });
+  const response = new Response("OK", { status: 200 });
 
-// Process in background using waitUntil
-if (typeof EdgeRuntime !== "undefined") {
-  EdgeRuntime.waitUntil(process());
-} else {
-  process(); // fire and forget
+  if (typeof EdgeRuntime !== "undefined") {
+    EdgeRuntime.waitUntil(process());
+  } else {
+    process();
+  }
+
+  return response;
 }
-
-return response;
