@@ -53,7 +53,7 @@ async function askClaude(question) {
     }),
   });
   const data = await resp.json();
-  console.log("Claude response status:", data.type);
+console.log("Claude full response:", JSON.stringify(data));
   return data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
 }
 
