@@ -14,7 +14,7 @@ Your behavior:
 5. If the question is clearly not HR-related, politely say so.`;
 
 async function postToSlack(channel, text) {
-  await fetch("https://slack.com/api/chat.postMessage", {
+  const resp = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -22,9 +22,13 @@ async function postToSlack(channel, text) {
     },
     body: JSON.stringify({ channel, text }),
   });
+  const data = await resp.json();
+  console.log("Slack post result:", JSON.stringify(data));
+  return data;
 }
 
 async function askClaude(question) {
+  console.log("Calling Claude with question:", question);
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -45,6 +49,7 @@ async function askClaude(question) {
     }),
   });
   const data = await resp.json();
+  console.log("Claude response:", JSON.stringify(data).slice(0, 500));
   return data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
 }
 
@@ -76,41 +81,6 @@ async function createJiraTicket(summary, description) {
   return null;
 }
 
-async function processMessage(channel, question) {
-  try {
-    await postToSlack(channel, "Looking that up for you... 🔍");
-
-    const answer = await askClaude(question);
-
-    const jsonMatch = answer.match(/\{"action"\s*:\s*"create_ticket"[\s\S]*?\}/);
-    if (jsonMatch) {
-      let parsed;
-      try { parsed = JSON.parse(jsonMatch[0]); } catch {}
-
-      if (parsed?.action === "create_ticket") {
-        await postToSlack(channel, "I couldn't find that in our HR knowledge base — raising a ticket with the HR team now...");
-        const ticket = await createJiraTicket(parsed.summary || question, parsed.description || question);
-
-        if (ticket?.ticketKey) {
-          await postToSlack(
-            channel,
-            `✅ Ticket raised: *${ticket.ticketKey}* — ${parsed.summary || question}\nThe HR team will follow up with you shortly. ${ticket.ticketUrl ? `<${ticket.ticketUrl}|View ticket>` : ""}`
-          );
-        } else {
-          await postToSlack(channel, "I tried to raise a ticket but hit an issue. Please reach out directly in *#ask-people* and the team will help you.");
-        }
-        return;
-      }
-    }
-
-    await postToSlack(channel, answer);
-
-  } catch (err) {
-    console.error("AskPeople error:", err);
-    await postToSlack(channel, "Something went wrong on my end. Please try again or reach out in *#ask-people*.");
-  }
-}
-
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
@@ -122,7 +92,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Invalid JSON" });
   }
 
-  // Slack URL verification handshake (one-time setup)
+  // Slack URL verification handshake
   if (body.type === "url_verification") {
     return res.status(200).json({ challenge: body.challenge });
   }
@@ -136,9 +106,54 @@ export default async function handler(req, res) {
   const question = event.text?.trim();
   if (!question) return res.status(200).end();
 
-  // Acknowledge Slack immediately — must respond within 3 seconds
+  // Use waitUntil to keep the function alive after responding to Slack
+  const processPromise = (async () => {
+    try {
+      await postToSlack(channel, "Looking that up for you... 🔍");
+
+      const answer = await askClaude(question);
+
+      const jsonMatch = answer.match(/\{"action"\s*:\s*"create_ticket"[\s\S]*?\}/);
+      if (jsonMatch) {
+        let parsed;
+        try { parsed = JSON.parse(jsonMatch[0]); } catch {}
+
+        if (parsed?.action === "create_ticket") {
+          await postToSlack(channel, "I couldn't find that in our HR knowledge base — raising a ticket with the HR team now...");
+          const ticket = await createJiraTicket(parsed.summary || question, parsed.description || question);
+
+          if (ticket?.ticketKey) {
+            await postToSlack(
+              channel,
+              `✅ Ticket raised: *${ticket.ticketKey}* — ${parsed.summary || question}\nThe HR team will follow up with you shortly. ${ticket.ticketUrl ? `<${ticket.ticketUrl}|View ticket>` : ""}`
+            );
+          } else {
+            await postToSlack(channel, "I tried to raise a ticket but hit an issue. Please reach out directly in *#ask-people* and the team will help you.");
+          }
+          return;
+        }
+      }
+
+      await postToSlack(channel, answer);
+
+    } catch (err) {
+      console.error("AskPeople error:", err);
+      await postToSlack(channel, "Something went wrong on my end. Please try again or reach out in *#ask-people*.");
+    }
+  })();
+
+  // Keep function alive until processing is done
+  if (res.socket?.server) {
+    res.socket.server.keepAliveTimeout = 61000;
+  }
+
+  // Tell Vercel to wait for the promise
+  if (typeof globalThis.waitUntil === "function") {
+    globalThis.waitUntil(processPromise);
+  }
+
   res.status(200).end();
 
-  // Process in background after responding to Slack
-  await processMessage(channel, question);
+  // Await after responding so Vercel doesn't kill the function
+  await processPromise;
 }
