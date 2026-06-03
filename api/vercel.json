@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/slack.js": {
+      "maxDuration": 60
+    }
+  }
+}
