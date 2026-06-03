@@ -182,63 +182,59 @@ export default async function handler(req) {
     return new Response("OK", { status: 200 });
   }
 
-  const process = async () => {
-    try {
-      await postToSlack(channel, "Looking that up for you... 🔍");
+  try {
+    await postToSlack(channel, "Looking that up for you... 🔍");
 
-      const pages = await searchNotion(question);
-      let notionContext = "";
+    const pages = await searchNotion(question);
+    let notionContext = "";
 
-      for (const page of pages.slice(0, 3)) {
-        const title =
-          page.properties?.title?.title?.[0]?.plain_text ||
-          page.properties?.Name?.title?.[0]?.plain_text ||
-          page.properties?.["Page"]?.title?.[0]?.plain_text ||
-          "Untitled";
-        const blocks = await getNotionBlocks(page.id);
-        const text = extractText(blocks);
-        console.log(`Page "${title}" extracted text length:`, text.length);
-        if (text.trim()) {
-          notionContext += `\n\n--- ${title} ---\n${text}`;
-        }
+    for (const page of pages.slice(0, 3)) {
+      const title =
+        page.properties?.title?.title?.[0]?.plain_text ||
+        page.properties?.Name?.title?.[0]?.plain_text ||
+        page.properties?.["Page"]?.title?.[0]?.plain_text ||
+        "Untitled";
+      const blocks = await getNotionBlocks(page.id);
+      const text = extractText(blocks);
+      console.log(`Page "${title}" extracted text length:`, text.length);
+      if (text.trim()) {
+        notionContext += `\n\n--- ${title} ---\n${text}`;
       }
-
-      if (!notionContext.trim()) {
-        notionContext = "No relevant content found in the Mesh Company Intranet.";
-      }
-
-      console.log("Total context length:", notionContext.length);
-
-      const answer = await askClaude(question, notionContext);
-
-      const jsonMatch = answer.match(/\{"action"\s*:\s*"create_ticket"[\s\S]*?\}/);
-      if (jsonMatch) {
-        let parsed;
-        try { parsed = JSON.parse(jsonMatch[0]); } catch {}
-        if (parsed?.action === "create_ticket") {
-          await postToSlack(channel, "I couldn't find that in our HR knowledge base — raising a ticket with the HR team now...");
-          const ticket = await createJiraTicket(
-            parsed.summary || question,
-            `Submitted via AskPeople Slack bot\n\n${parsed.description || question}`
-          );
-          if (ticket?.ticketKey) {
-            await postToSlack(channel, `✅ Ticket raised: *${ticket.ticketKey}* — ${parsed.summary || question}\nThe HR team will follow up with you shortly. <${ticket.ticketUrl}|View ticket>`);
-          } else {
-            await postToSlack(channel, "I tried to raise a ticket but hit an issue. Please reach out directly in *#ask-people*.");
-          }
-          return;
-        }
-      }
-
-      await postToSlack(channel, answer);
-
-    } catch (err) {
-      console.error("AskPeople error:", err.message);
-      await postToSlack(channel, "Something went wrong on my end. Please try again or reach out in *#ask-people*.");
     }
-  };
 
- await process();
+    if (!notionContext.trim()) {
+      notionContext = "No relevant content found in the Mesh Company Intranet.";
+    }
 
-return new Response("OK", { status: 200 });
+    console.log("Total context length:", notionContext.length);
+
+    const answer = await askClaude(question, notionContext);
+
+    const jsonMatch = answer.match(/\{"action"\s*:\s*"create_ticket"[\s\S]*?\}/);
+    if (jsonMatch) {
+      let parsed;
+      try { parsed = JSON.parse(jsonMatch[0]); } catch {}
+      if (parsed?.action === "create_ticket") {
+        await postToSlack(channel, "I couldn't find that in our HR knowledge base — raising a ticket with the HR team now...");
+        const ticket = await createJiraTicket(
+          parsed.summary || question,
+          `Submitted via AskPeople Slack bot\n\n${parsed.description || question}`
+        );
+        if (ticket?.ticketKey) {
+          await postToSlack(channel, `✅ Ticket raised: *${ticket.ticketKey}* — ${parsed.summary || question}\nThe HR team will follow up with you shortly. <${ticket.ticketUrl}|View ticket>`);
+        } else {
+          await postToSlack(channel, "I tried to raise a ticket but hit an issue. Please reach out directly in *#ask-people*.");
+        }
+        return new Response("OK", { status: 200 });
+      }
+    }
+
+    await postToSlack(channel, answer);
+
+  } catch (err) {
+    console.error("AskPeople error:", err.message);
+    await postToSlack(channel, "Something went wrong on my end. Please try again or reach out in *#ask-people*.");
+  }
+
+  return new Response("OK", { status: 200 });
 }
